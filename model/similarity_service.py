@@ -10,13 +10,14 @@ import requests
 import uuid
 from datetime import datetime
 import re
+import string
 
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)
 
 # Initialize the SentenceTransformer model
-model = SentenceTransformer('all-MiniLM-L6-v2')
+model = SentenceTransformer('multi-qa-mpnet-base-dot-v1')
 
 # Database configuration
 db_config = {
@@ -87,7 +88,7 @@ def generate_embeddings():
         projects = cursor.fetchall()
 
         for project in projects:
-            combined_text = project['title'] + " " + project['abstract']
+            combined_text = clean_text(project['title']) + " " + clean_text(project['abstract'])
             embedding = generate_embedding(combined_text)
             embedding_json = json.dumps(embedding)
             cursor.execute("UPDATE project_iomp SET embedding = %s WHERE id = %s", (embedding_json, project['id']))
@@ -141,34 +142,46 @@ def find_similar_projects():
         similarity_category = categorize_similarity(similarity)
 
         similarities.append({
-            "id": project['id'],
-            "title": project['title'],
-            "abstract": project['abstract'],
-            "similarity": similarity,
-            "similarity_category": "Identical" if is_identical else similarity_category,
-            "warning": "Identical Title and Abstract" if is_identical else None
+           "id": project['id'],
+           "title": project['title'],
+           "abstract": project['abstract'],
+           "similarity": similarity,
+           "similarity_category": "Identical" if is_identical else similarity_category,
+            "warning": "Highly identical project" if is_identical else None
         })
 
+        #  # Add warning if similarity is greater than 0.9
+        # warning = None
+        # if is_identical:
+        #     warning = "Highly identical project"
+        # elif similarity > 0.9:
+        #     warning = "This project is highly similar to your input"
+
+        # similarities.append({
+        #     "id": project['id'],
+        #     "title": project['title'],
+        #     "abstract": project['abstract'],
+        #     "similarity": similarity,
+        #     "similarity_category": "Identical" if is_identical else similarity_category,
+        #     "warning": warning
+        # })
+
     print('step 2')
+     # Filter out projects with similarity scores less than 0.5
+    similarities = [item for item in similarities if item['similarity'] >= 0.3]
 
-    # Set a threshold to detect gibberish input
-    GIBBERISH_THRESHOLD = 0.2
-    # if max_similarity < GIBBERISH_THRESHOLD:
-    #     return jsonify([]), 200
-
-    # Filter out low similarity projects (optional)
-    similarities = [item for item in similarities if item['similarity'] > 0.1]
+    print('step 3')
 
     # Sort projects by similarity score in descending order and place identical entries at the top
     similarities = sorted(similarities, key=lambda x: (-int(x['similarity_category'] == "Identical"), -x['similarity']))[:3]
 
-    print('step 3')
-    search_guid = check_with_llm(similarities, user_text)
     print('step 4')
+    search_guid = check_with_llm(similarities, combined_input)
+    print('step 5')
     search_results = get_matching_data(search_guid)
     cursor.close()
     connection.close()
-    print('step 5')
+    print('step 6')
     return jsonify(search_results), 200
 
 def get_matching_data(search_guid):
@@ -180,7 +193,7 @@ def get_matching_data(search_guid):
         project_iomp.title,
         project_iomp.abstract,
         user_session.search_guid,
-        user_session.matching_score,
+        user_session.cosine_similarity matching_score,
         user_session.matching_comments
     FROM user_session
     INNER JOIN project_iomp ON user_session.matched_project_id = project_iomp.id
@@ -219,7 +232,7 @@ def check_with_llm(projects, user_abstract):
     for idx, project in enumerate(projects):
         print(f"Processing Project {idx + 1}/{len(projects)}")
         # Call the interact_with_llm method for each project abstract
-        comparison_result = interact_with_llm(project['abstract'], user_abstract)
+        comparison_result = interact_with_llm(project, user_abstract)
         store_matching_info_to_db(guid, project, comparison_result, user_abstract)
 
     return guid
@@ -229,8 +242,10 @@ def store_matching_info_to_db(guid, project, result_data, user_abstract):
 
      # Extract information from result_data
     matched_project_id = project['id']
-    matching_score = result_data.get("similarity_score", None)
-    matching_comments = result_data.get("comments", "")
+    cosine_similarity = int(project.get("similarity", 0) * 100)
+    # matching_score = int(result_data.get("similarity_score", 0))
+    # matching_comments = result_data.get("comments", "")
+    matching_comments = result_data
 
     try:
         # Establish the database connection
@@ -239,15 +254,15 @@ def store_matching_info_to_db(guid, project, result_data, user_abstract):
 
         # SQL insert query
         insert_query = """
-        INSERT INTO user_session (search_guid, user_abstract, matched_project_id, matching_score, matching_comments, created_dt)
+        INSERT INTO user_session (search_guid, user_abstract, matched_project_id, cosine_similarity, matching_comments, created_dt)
         VALUES (%s, %s, %s, %s, %s, %s)
         """
 
         # Prepare the data for insertion
-        created_dt = datetime.now().date()
-        data = (guid, user_abstract, matched_project_id, matching_score, json.dumps(matching_comments), created_dt)
+        created_dt = datetime.now()
+        data = (guid, user_abstract, matched_project_id, cosine_similarity, matching_comments, created_dt)
 
-        print(f'Executing the Insert with {guid} :: {user_abstract} ::{matched_project_id} :: {matching_score} :: {json.dumps(matching_comments)} :: {created_dt}')
+        # print(f'Executing the Insert with {guid} :: {user_abstract} ::{matched_project_id} :: {cosine_similarity}:: {json.dumps(matching_comments)} :: {created_dt}')
 
         # Execute the insert query
         cursor.execute(insert_query, data)
@@ -272,16 +287,17 @@ def store_matching_info_to_db(guid, project, result_data, user_abstract):
         if connection:
             connection.close()
 
-def interact_with_llm(project_abstract, user_abstract):
+def interact_with_llm(project, user_abstract):
     """
     Interacts with the LLaMA API, sends a prompt, and extracts JSON response.
     Returns an empty dictionary if any error occurs.
     """
-    prompt = generate_prompt(project_abstract, user_abstract)
+    project_abstract = project['abstract']
+    prompt = generate_prompt(project_abstract, user_abstract, project['similarity'])
     payload = {
         "model": "llama3.2",
         "prompt": prompt,
-        "temperature": 0.7,
+        "temperature": 0.1,
         "max_tokens": 256,
         "stop": None,
         "stream": False
@@ -301,10 +317,9 @@ def interact_with_llm(project_abstract, user_abstract):
         llm_response = data.get('response', '')
 
         # Extract JSON data from the response text
-        completion = extract_json_from_response(llm_response)
-        print("Extracted JSON:", completion)
+        # completion = extract_json_from_response(llm_response)
 
-        return completion
+        return llm_response
 
     except requests.exceptions.RequestException as e:
         print(f"Request failed: {e}")
@@ -323,6 +338,7 @@ def extract_json_from_response(response_text):
     Extracts JSON data from the given response text.
     Returns an empty dictionary if no valid JSON is found.
     """
+
     try:
         # Regular expression to find the JSON object in the response
         json_pattern = r"\{[\s\S]*\}"
@@ -343,6 +359,7 @@ def extract_json_from_response(response_text):
 
         else:
             print("No JSON found in the response.")
+            print(response_text)
             return {}
 
     except (json.JSONDecodeError, ValueError) as e:
@@ -354,33 +371,37 @@ def extract_json_from_response(response_text):
         return {}
 
 
-def generate_prompt(project_abstract: str, user_abstract: str) -> str:
-    """
-    Generates a system prompt for LLaMA by appending the project abstract and user abstract,
-    prefixed with 'ABSTRACT:', using a predefined system prompt for plagiarism review.
+def generate_prompt(project_abstract, user_abstract, cosine_similarity):
+    # Base system prompt logic with adjustments for LLaMA 3.2
+    if cosine_similarity > 0.90:
+        focus_instruction = "Focus primarily on the **similarities** between the abstracts, but include key differences."
+    elif 0.70 < cosine_similarity <= 0.90:
+        focus_instruction = "Provide a slightly **similarity-focused** view, while still discussing key differences."
+    elif 0.40 < cosine_similarity <= 0.70:
+        focus_instruction = "Provide a **balanced view**, discussing both similarities and differences equally."
+    else:  # cosine_similarity <= 0.40
+        focus_instruction = "Focus primarily on the **differences** between the abstracts, but include key similarities."
 
-    Args:
-        project_abstract (str): The abstract for the project.
-        user_abstract (str): The user-provided abstract.
+    # System prompt with specific format instructions
+    system_prompt = f"""
+    You are an academic reviewer analyzing two project abstracts. Your task is to compare them and output the results in the following structure:
 
-    Returns:
-        str: The combined prompt ready for LLaMA input.
+    ### Similarities:
+    (List the key similarities here in bullet points)
+
+    ### Differences:
+    (List the key differences here in bullet points)
+
+    Analysis focus: {focus_instruction}
+
+    Ensure that in your response, you refer the abstracts as existing project and proposed project.
+
+    Abstracts for comparison are provided below:
     """
-    # Hard-coded system prompt
-    system_prompt = (
-        "I am a lecturer reviewing two student project abstracts to ensure their ideas are original "
-        "and have not been previously carried out. Please perform the following tasks:\n\n"
-        "Calculate the Percentage of Similarity: Analyze the two abstracts and determine the percentage "
-        "of similarity between them, and provide the following information in JSON format with the following details:\n"
-        "{\n"
-        "    similarity_score: <<Calculated similarity score percentage from 0 to 100% (100% being exactly equal)>>,\n"
-        "    comments: <<Bullet list of why the project is considered similar / dissimilar>>\n"
-        "}"
-    )
 
     # Format the abstracts
-    formatted_project_abstract = f"ABSTRACT:\n{project_abstract.strip()}\n"
-    formatted_user_abstract = f"ABSTRACT:\n{user_abstract.strip()}\n"
+    formatted_project_abstract = f"#### Existing Project Abstract:\n{project_abstract.strip()}\n"
+    formatted_user_abstract = f"#### Proposed Project Abstract:\n{user_abstract.strip()}\n"
 
     # Combine the system prompt with the abstracts
     combined_prompt = (
@@ -390,6 +411,28 @@ def generate_prompt(project_abstract: str, user_abstract: str) -> str:
     )
 
     return combined_prompt
+
+def clean_text(text: str) -> str:
+    """
+    Cleans the input text by:
+    1. Converting to lowercase
+    2. Removing punctuation and special characters
+    3. Stripping extra whitespace
+    """
+    if not isinstance(text, str):
+        return ""  # Return an empty string if the input is not a string
+
+    # 1. Convert text to lowercase
+    text = text.lower()
+
+    # 2. Remove punctuation and special characters
+    text = re.sub(f"[{re.escape(string.punctuation)}]", "", text)
+
+    # 3. Strip extra whitespace (tabs, newlines, multiple spaces)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
 
 if __name__ == '__main__':
     app.run(port=5001)

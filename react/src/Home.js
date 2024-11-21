@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import axios from 'axios';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import { FaSearch } from 'react-icons/fa';
+import ReactMarkdown from "react-markdown";
 
 function Home() {
   const [title, setTitle] = useState('');
@@ -12,6 +13,8 @@ function Home() {
   // Function to handle search request
   const handleSearch = async () => {
     setLoading(true);
+    setResults([]);
+
     try {
       const response = await axios.post('http://localhost:5001/api/find_similar_projects', {
         text: title,
@@ -73,7 +76,7 @@ function Home() {
       {/* Results Section */}
       {results.length > 0 ? (
         <div className="mt-4">
-          <h2 className="text-center">Top 10 Similar Projects</h2>
+          <h2 className="text-center">Top Similar Projects</h2>
           <table className="table table-bordered mt-3">
             <thead>
               <tr>
@@ -92,8 +95,8 @@ function Home() {
                   <td className="text-justify justified-text">{result.title}</td>
                   {/* Justified Abstract */}
                   <td className="text-justify justified-text">{result.abstract}</td>
-                  <td>{result.matching_score}</td>
-                  <td>{result.matching_comments}</td>
+                  <td>{JSON.stringify(result.matching_score)}</td>
+                  <td> <ReactMarkdown>{result.matching_comments}</ReactMarkdown></td>
                 </tr>
               ))}
             </tbody>
