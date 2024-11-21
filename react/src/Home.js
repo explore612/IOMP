@@ -1,30 +1,64 @@
-import React, { useState } from 'react';
-import axios from 'axios';
-import 'bootstrap/dist/css/bootstrap.min.css';
-import { FaSearch } from 'react-icons/fa';
+import React, { useState } from "react";
+import axios from "axios";
+import "bootstrap/dist/css/bootstrap.min.css";
+import { FaSearch, FaThumbsUp, FaThumbsDown, FaMeh } from "react-icons/fa";
 import ReactMarkdown from "react-markdown";
 
 function Home() {
-  const [title, setTitle] = useState('');
-  const [abstract, setAbstract] = useState('');
+  const [title, setTitle] = useState("");
+  const [abstract, setAbstract] = useState("");
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [decision, setDecision] = useState(null);
 
   // Function to handle search request
   const handleSearch = async () => {
     setLoading(true);
     setResults([]);
+    setDecision(null);
 
     try {
-      const response = await axios.post('http://localhost:5001/api/find_similar_projects', {
-        text: title,
-        abstract: abstract,
-      });
+      const response = await axios.post(
+        "http://localhost:5001/api/find_similar_projects",
+        {
+          text: title,
+          abstract: abstract,
+        }
+      );
       setResults(response.data);
+
+      // Calculate average matching score and set decision
+      if (response.data.length > 0) {
+        const maxScore = Math.max(...response.data.map(result => result.matching_score));
+        setDecision(getDecision(maxScore));
+      }
     } catch (error) {
-      console.error('Error fetching data:', error);
+      console.error("Error fetching data:", error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Function to get decision based on average score
+  const getDecision = (maxScore) => {
+    if (maxScore >= 85) {
+      return {
+        message: "Not Recommended: Too Similar",
+        icon: <FaThumbsDown className="text-danger" />,
+        color: "danger",
+      };
+    } else if (maxScore >= 50) {
+      return {
+        message: "Neutral: Review Carefully",
+        icon: <FaMeh className="text-warning" />,
+        color: "warning",
+      };
+    } else {
+      return {
+        message: "Recommended: Good to Go",
+        icon: <FaThumbsUp className="text-success" />,
+        color: "success",
+      };
     }
   };
 
@@ -73,6 +107,17 @@ function Home() {
         )}
       </button>
 
+      {/* Decision Bar */}
+      {decision && (
+        <div
+          className={`alert alert-${decision.color} text-center d-flex align-items-center justify-content-center mb-4`}
+          role="alert"
+        >
+          {decision.icon}
+          <span className="ms-2">{decision.message}</span>
+        </div>
+      )}
+
       {/* Results Section */}
       {results.length > 0 ? (
         <div className="mt-4">
@@ -83,7 +128,7 @@ function Home() {
                 <th>Project ID</th>
                 <th>Title</th>
                 <th>Abstract</th>
-                <th>Similarity Score</th>
+                <th>Matching Score</th>
                 <th>Comments</th>
               </tr>
             </thead>
@@ -95,8 +140,15 @@ function Home() {
                   <td className="text-justify justified-text">{result.title}</td>
                   {/* Justified Abstract */}
                   <td className="text-justify justified-text">{result.abstract}</td>
-                  <td>{JSON.stringify(result.matching_score)}</td>
-                  <td> <ReactMarkdown>{result.matching_comments}</ReactMarkdown></td>
+                  <td>
+                    {/* Matching Score */}
+                    <span className="matching-score">
+                      {result.matching_score}%
+                    </span>
+                  </td>
+                  <td>
+                    <ReactMarkdown>{result.matching_comments}</ReactMarkdown>
+                  </td>
                 </tr>
               ))}
             </tbody>
